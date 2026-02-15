@@ -16,7 +16,6 @@ async function updateProxyList() {
     const sources = [
       'https://www.proxy-list.download/api/v1/get?type=http&anon=elite&country=IN',
       'https://api.proxyscrape.com/v2/?request=get&protocol=http&timeout=10000&country=IN',
-      'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
     ];
     
     const allProxies = new Set();
@@ -27,7 +26,7 @@ async function updateProxyList() {
         const text = await response.text();
         const proxies = text.split('\n')
           .map(p => p.trim())
-          .filter(p => p && p.includes(':'));
+          .filter(p => p && p.includes(':') && p.split(':').length === 2);
         
         proxies.forEach(p => allProxies.add(p));
       } catch (e) {
@@ -37,15 +36,15 @@ async function updateProxyList() {
     
     workingProxies = Array.from(allProxies);
     lastProxyUpdate = Date.now();
-    console.log(`Updated proxy list: ${workingProxies.length} proxies`);
+    console.log(`[${new Date().toISOString()}] Updated proxy list: ${workingProxies.length} proxies`);
     
   } catch (error) {
     console.error('Failed to update proxy list:', error.message);
   }
 }
 
-// Try fetching through multiple proxies
-async function fetchThroughProxy(targetUrl, maxAttempts = 5) {
+// Try fetching through multiple proxies with custom headers
+async function fetchThroughProxy(targetUrl, customHeaders = {}, maxAttempts = 5) {
   if (Date.now() - lastProxyUpdate > PROXY_REFRESH_INTERVAL) {
     await updateProxyList();
   }
@@ -56,32 +55,38 @@ async function fetchThroughProxy(targetUrl, maxAttempts = 5) {
   
   const attempts = Math.min(maxAttempts, workingProxies.length);
   
+  // Default headers merged with custom headers
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Accept': '*/*',
+    'Cache-Control': 'no-cache',
+    ...customHeaders // Override with custom headers
+  };
+  
   for (let i = 0; i < attempts; i++) {
     const proxy = workingProxies[i];
     
     try {
-      console.log(`Attempt ${i + 1}/${attempts} using proxy: ${proxy}`);
+      console.log(`[${new Date().toISOString()}] Attempt ${i + 1}/${attempts} using proxy: ${proxy}`);
       
       const agent = new HttpsProxyAgent(`http://${proxy}`);
       
       const response = await fetch(targetUrl, {
         agent,
-        timeout: 10000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': '*/*',
-          'Cache-Control': 'no-cache'
-        }
+        timeout: 15000,
+        headers: headers
       });
       
       if (response.ok) {
-        console.log(`✓ Success with proxy: ${proxy}`);
+        console.log(`[${new Date().toISOString()}] ✓ Success with proxy: ${proxy}`);
         return response;
       }
       
+      console.log(`[${new Date().toISOString()}] Proxy ${proxy} returned status: ${response.status}`);
+      
     } catch (error) {
-      console.log(`✗ Failed with proxy ${proxy}: ${error.message}`);
-      // Remove failed proxy
+      console.log(`[${new Date().toISOString()}] ✗ Failed with proxy ${proxy}: ${error.message}`);
+      // Remove failed proxy from the pool
       workingProxies.splice(i, 1);
       i--;
     }
@@ -103,39 +108,94 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'running',
+    service: 'Indian IP Proxy Relay',
     proxies: workingProxies.length,
     lastUpdate: new Date(lastProxyUpdate).toISOString(),
-    usage: 'GET /proxy?url=https://example.com'
+    uptime: process.uptime(),
+    usage: {
+      endpoint: '/proxy',
+      params: {
+        url: 'Target URL (required)',
+        headers: 'JSON string of custom headers (optional)'
+      },
+      example: '/proxy?url=https://example.com&headers={"User-Agent":"Custom"}'
+    }
   });
 });
 
-// Proxy endpoint
+// Main proxy endpoint
 app.get('/proxy', async (req, res) => {
   const targetUrl = req.query.url;
   
   if (!targetUrl) {
-    return res.status(400).json({ error: 'url parameter required' });
+    return res.status(400).json({ 
+      error: 'Missing url parameter',
+      usage: '/proxy?url=https://example.com'
+    });
+  }
+  
+  // Parse custom headers if provided
+  let customHeaders = {};
+  if (req.query.headers) {
+    try {
+      customHeaders = JSON.parse(req.query.headers);
+      console.log(`[${new Date().toISOString()}] Custom headers received:`, customHeaders);
+    } catch (e) {
+      return res.status(400).json({ 
+        error: 'Invalid headers parameter',
+        message: 'headers must be valid JSON'
+      });
+    }
   }
   
   try {
-    const response = await fetchThroughProxy(targetUrl);
+    const response = await fetchThroughProxy(targetUrl, customHeaders);
     const data = await response.text();
     
+    console.log(`[${new Date().toISOString()}] Response length: ${data.length} bytes`);
+    
+    // Set response headers
     res.set('Content-Type', response.headers.get('content-type') || 'text/plain');
+    res.set('X-Proxied-From', 'India');
+    res.set('X-Proxy-Status', 'Success');
+    
     res.send(data);
     
   } catch (error) {
+    console.error(`[${new Date().toISOString()}] Proxy failed:`, error.message);
+    
     res.status(502).json({ 
-      error: 'Proxy failed', 
+      error: 'Proxy request failed', 
       message: error.message,
-      proxiesAvailable: workingProxies.length
+      proxiesAvailable: workingProxies.length,
+      suggestion: 'Try again in a few moments'
     });
   }
+});
+
+// Proxy status endpoint
+app.get('/status', (req, res) => {
+  res.json({
+    proxies: {
+      total: workingProxies.length,
+      sample: workingProxies.slice(0, 5),
+      lastUpdate: new Date(lastProxyUpdate).toISOString()
+    },
+    server: {
+      uptime: process.uptime(),
+      memory: process.memoryUsage(),
+      version: process.version
+    }
+  });
 });
 
 // Initialize proxy list on startup
 updateProxyList();
 
+// Refresh proxy list periodically
+setInterval(updateProxyList, PROXY_REFRESH_INTERVAL);
+
 app.listen(PORT, () => {
-  console.log(`Indian Proxy Relay running on port ${PORT}`);
+  console.log(`[${new Date().toISOString()}] Indian Proxy Relay Server running on port ${PORT}`);
+  console.log(`[${new Date().toISOString()}] Ready to proxy requests through Indian IPs`);
 });
